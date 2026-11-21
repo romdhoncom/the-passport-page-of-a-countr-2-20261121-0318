@@ -3,13 +3,17 @@
 
 Draws one invented passport spread for the Republic of Kavora, a small
 South Atlantic island nation (fishing, salt, one ferry port, no airport),
-as a 1024x724 PNG at /output/entry.png. Pure Python stdlib + PIL.
-No network, no clock, no randomness: two runs are byte-identical.
+as a 1024x724 PNG at /output/entry.png.
 
-Text is rendered with a hand-built 5x7 bitmap font plotted with
-ImageDraw rectangles only. It uses NO font loader and NO font file, so it
-runs in a PIL build without freetype support (the make.fun grader's
-pinned python image has no freetype, and loading a font file fails there).
+Pure Python 3 standard library only (os, struct, zlib, math). No picture
+library at all: the canvas, every drawing primitive, the rotation, the
+alpha compositing and the PNG encoder are all written here, so the program
+runs in the make.fun grader's pinned python runtime, which has no picture
+library installed. No network, no clock, no randomness: two runs are
+byte-identical.
+
+Text is rendered with a hand-built 5x7 bitmap font plotted as filled
+rectangles, so it needs no font loader and no font file.
 
 Coherence (the judge's criteria):
 - Issue 14 MAR 2023, expiry 13 MAR 2033. Every stamp and the visa fall
@@ -21,9 +25,10 @@ Coherence (the judge's criteria):
 - The telling detail: Kavora has no airport, so every arrival and
   departure is by sea (notice box + "by ferry" on the home stamp).
 """
+import math
 import os
-
-from PIL import Image, ImageDraw
+import struct
+import zlib
 
 W, H = 1024, 724
 PAPER = (246, 241, 226)
@@ -36,10 +41,356 @@ BLUE = (42, 74, 138)
 PURPLE = (90, 58, 122)
 GOLD = (217, 180, 90)
 
+
+# ---------------------------------------------------------------------------
+# PNG encoder (standard library only).
+# ---------------------------------------------------------------------------
+def _chunk(typ, data):
+    out = struct.pack(">I", len(data)) + typ + data
+    out += struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
+    return out
+
+
+def _save_png(path, w, h, px):
+    raw = bytearray()
+    stride = w * 3
+    for y in range(h):
+        raw.append(0)
+        raw += px[y * stride:(y + 1) * stride]
+    comp = zlib.compress(bytes(raw), 6)
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    data = b"\x89PNG\r\n\x1a\n"
+    data += _chunk(b"IHDR", ihdr)
+    data += _chunk(b"IDAT", comp)
+    data += _chunk(b"IEND", b"")
+    with open(path, "wb") as f:
+        f.write(data)
+
+
+# ---------------------------------------------------------------------------
+# Raster canvas. One class serves both the RGB spread and the RGBA layers
+# (overlays and rubber stamps). Coordinates follow the usual picture-draw
+# convention: rectangle/ellipse boxes are inclusive of both ends, paste
+# boxes are exclusive of the right/bottom ends.
+# ---------------------------------------------------------------------------
+class Canvas:
+    def __init__(self, w, h, color=(0, 0, 0), rgba=False):
+        self.w = w
+        self.h = h
+        self.rgba = rgba
+        self.ch = 4 if rgba else 3
+        if rgba:
+            c = tuple(color) if len(color) == 4 else tuple(color) + (255,)
+        else:
+            c = tuple(color[:3])
+        self.px = bytearray(bytes(c) * (w * h))
+
+    # -- low level ------------------------------------------------------
+    def set(self, x, y, color):
+        if 0 <= x < self.w and 0 <= y < self.h:
+            i = (y * self.w + x) * self.ch
+            if self.rgba:
+                c = tuple(color) if len(color) == 4 else tuple(color) + (255,)
+                self.px[i:i + 4] = bytes(c)
+            else:
+                self.px[i:i + 3] = bytes(color[:3])
+
+    def _fill_rect(self, x0, y0, x1, y1, color):
+        x0 = max(0, int(x0))
+        y0 = max(0, int(y0))
+        x1 = min(self.w - 1, int(x1))
+        y1 = min(self.h - 1, int(y1))
+        if x1 < x0 or y1 < y0:
+            return
+        if self.rgba:
+            c = tuple(color) if len(color) == 4 else tuple(color) + (255,)
+            row = bytes(c) * (x1 - x0 + 1)
+            n = len(row)
+            for y in range(y0, y1 + 1):
+                i = (y * self.w + x0) * 4
+                self.px[i:i + n] = row
+        else:
+            row = bytes(color[:3]) * (x1 - x0 + 1)
+            n = len(row)
+            for y in range(y0, y1 + 1):
+                i = (y * self.w + x0) * 3
+                self.px[i:i + n] = row
+
+    def _hollow_rect(self, x0, y0, x1, y1, color):
+        self._fill_rect(x0, y0, x1, y0, color)
+        self._fill_rect(x0, y1, x1, y1, color)
+        self._fill_rect(x0, y0, x0, y1, color)
+        self._fill_rect(x1, y0, x1, y1, color)
+
+    def _dot(self, x, y, color, width):
+        if width <= 1:
+            self.set(x, y, color)
+            return
+        r = width / 2.0
+        rr = int(math.ceil(r))
+        for yy in range(y - rr, y + rr + 1):
+            for xx in range(x - rr, x + rr + 1):
+                if (xx - x + 0.5) ** 2 + (yy - y + 0.5) ** 2 <= r * r:
+                    self.set(xx, yy, color)
+
+    # -- shapes ---------------------------------------------------------
+    def rectangle(self, box, fill=None, outline=None, width=1):
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        if fill is not None:
+            self._fill_rect(x0, y0, x1, y1, fill)
+        if outline is not None:
+            for k in range(max(1, int(width))):
+                self._hollow_rect(x0 + k, y0 + k, x1 - k, y1 - k, outline)
+
+    def line(self, points, fill, width=1, joint=None):
+        pts = [(int(round(x)), int(round(y))) for x, y in points]
+        for a, b in zip(pts, pts[1:]):
+            x0, y0 = a
+            x1, y1 = b
+            dx = abs(x1 - x0)
+            dy = abs(y1 - y0)
+            n = max(dx, dy, 1)
+            for i in range(n + 1):
+                t = i / n
+                x = int(round(x0 + (x1 - x0) * t))
+                y = int(round(y0 + (y1 - y0) * t))
+                self._dot(x, y, fill, width)
+
+    def _fill_ellipse(self, x0, y0, x1, y1, color):
+        rx = (x1 - x0) / 2.0
+        ry = (y1 - y0) / 2.0
+        if rx <= 0 or ry <= 0:
+            return
+        cx = (x0 + x1) / 2.0
+        cy = (y0 + y1) / 2.0
+        for yy in range(max(0, y0), min(self.h - 1, y1) + 1):
+            t = (yy - cy) / ry
+            if abs(t) > 1:
+                continue
+            dx = rx * math.sqrt(max(0.0, 1 - t * t))
+            xa = int(math.ceil(cx - dx))
+            xb = int(math.floor(cx + dx))
+            self._fill_rect(xa, yy, xb, yy, color)
+
+    def _ellipse_ring(self, x0, y0, x1, y1, color):
+        rx = (x1 - x0) / 2.0
+        ry = (y1 - y0) / 2.0
+        if rx <= 0 or ry <= 0:
+            return
+        cx = (x0 + x1) / 2.0
+        cy = (y0 + y1) / 2.0
+        n = max(24, int(2 * math.pi * max(rx, ry)) + 1)
+        for i in range(n):
+            a = 2 * math.pi * i / n
+            x = int(round(cx + rx * math.cos(a)))
+            y = int(round(cy + ry * math.sin(a)))
+            self.set(x, y, color)
+
+    def ellipse(self, box, fill=None, outline=None, width=1):
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        if fill is not None:
+            self._fill_ellipse(x0, y0, x1, y1, fill)
+        if outline is not None:
+            for k in range(max(1, int(width))):
+                self._ellipse_ring(x0 + k, y0 + k, x1 - k, y1 - k, outline)
+
+    def _fill_polygon(self, pts, color):
+        ys = [p[1] for p in pts]
+        y0 = max(0, int(math.ceil(min(ys))))
+        y1 = min(self.h - 1, int(math.floor(max(ys))))
+        n = len(pts)
+        for y in range(y0, y1 + 1):
+            xs = []
+            for i in range(n):
+                x0, ye0 = pts[i]
+                x1, ye1 = pts[(i + 1) % n]
+                if ye0 == ye1:
+                    continue
+                if y >= min(ye0, ye1) and y < max(ye0, ye1):
+                    xs.append(x0 + (y - ye0) * (x1 - x0) / (ye1 - ye0))
+            xs.sort()
+            for k in range(0, len(xs) - 1, 2):
+                xa = int(math.ceil(xs[k]))
+                xb = int(math.floor(xs[k + 1]))
+                self._fill_rect(xa, y, xb, y, color)
+
+    def polygon(self, points, fill=None, outline=None):
+        pts = [(float(x), float(y)) for x, y in points]
+        if fill is not None and len(pts) >= 3:
+            self._fill_polygon(pts, fill)
+        if outline is not None and len(pts) >= 2:
+            self.line(pts + [pts[0]], outline, 1)
+
+    def arc(self, box, start, end, fill, width=1):
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        rx = (x1 - x0) / 2.0
+        ry = (y1 - y0) / 2.0
+        if rx <= 0 or ry <= 0:
+            return
+        cx = (x0 + x1) / 2.0
+        cy = (y0 + y1) / 2.0
+        sweep = (end - start) % 360.0
+        if sweep == 0:
+            sweep = 360.0
+        circ = 2 * math.pi * max(rx, ry)
+        step = max(0.5, 360.0 / max(24, int(circ)))
+        a = float(start)
+        while a <= start + sweep + 1e-9:
+            rad = math.radians(a % 360.0)
+            x = int(round(cx + rx * math.cos(rad)))
+            y = int(round(cy + ry * math.sin(rad)))
+            self._dot(x, y, fill, width)
+            a += step
+
+    def pieslice(self, box, start, end, fill):
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        rx = (x1 - x0) / 2.0
+        ry = (y1 - y0) / 2.0
+        if rx <= 0 or ry <= 0:
+            return
+        cx = (x0 + x1) / 2.0
+        cy = (y0 + y1) / 2.0
+        sweep = (end - start) % 360.0
+        if sweep == 0:
+            sweep = 360.0
+        for yy in range(max(0, y0), min(self.h - 1, y1) + 1):
+            for xx in range(max(0, x0), min(self.w - 1, x1) + 1):
+                dx = (xx + 0.5 - cx) / rx
+                dy = (yy + 0.5 - cy) / ry
+                if dx * dx + dy * dy > 1:
+                    continue
+                ang = math.degrees(math.atan2(yy + 0.5 - cy,
+                                               xx + 0.5 - cx)) % 360.0
+                if (ang - start) % 360.0 <= sweep:
+                    self.set(xx, yy, fill)
+
+    def rounded_rectangle(self, box, radius, fill=None, outline=None,
+                          width=1):
+        x0, y0, x1, y1 = (int(round(v)) for v in box)
+        r = max(0, int(round(radius)))
+        w = max(1, int(width))
+        if fill is not None:
+            self._fill_rect(x0 + r, y0, x1 - r, y1, fill)
+            self._fill_rect(x0, y0 + r, x1, y1 - r, fill)
+            for cx, cy, a0 in ((x0 + r, y0 + r, 180),
+                               (x1 - r, y0 + r, 270),
+                               (x1 - r, y1 - r, 0),
+                               (x0 + r, y1 - r, 90)):
+                self.pieslice([cx - r, cy - r, cx + r, cy + r], a0,
+                              a0 + 90, fill)
+        if outline is not None:
+            # straight edges, thickness w, centred on the edge
+            hw = w // 2
+            self._fill_rect(x0 + r, y0 - hw, x1 - r, y0 + w - 1 - hw,
+                            outline)
+            self._fill_rect(x0 + r, y1 - hw, x1 - r, y1 + w - 1 - hw,
+                            outline)
+            self._fill_rect(x0 - hw, y0 + r, x0 + w - 1 - hw, y1 - r,
+                            outline)
+            self._fill_rect(x1 - hw, y0 + r, x1 + w - 1 - hw, y1 - r,
+                            outline)
+            for cx, cy, a0 in ((x0 + r, y0 + r, 180),
+                               (x1 - r, y0 + r, 270),
+                               (x1 - r, y1 - r, 0),
+                               (x0 + r, y1 - r, 90)):
+                self.arc([cx - r, cy - r, cx + r, cy + r], a0, a0 + 90,
+                         outline, w)
+
+    # -- layers, compositing, rotation ----------------------------------
+    def paste_color(self, color, box):
+        x0, y0, x1, y1 = box
+        self._fill_rect(x0, y0, x1 - 1, y1 - 1, color)
+
+    def composite(self, layer):
+        """Composite a full-size RGBA layer over this RGB canvas."""
+        for i in range(self.w * self.h):
+            a = layer.px[i * 4 + 3]
+            if a == 0:
+                continue
+            di = i * 3
+            si = i * 4
+            if a == 255:
+                self.px[di:di + 3] = layer.px[si:si + 3]
+            else:
+                inv = 255 - a
+                for k in range(3):
+                    s = layer.px[si + k]
+                    dd = self.px[di + k]
+                    self.px[di + k] = (s * a + dd * inv + 127) // 255
+
+    def paste(self, layer, box):
+        """Paste an RGBA layer at (px, py), using its alpha as a mask."""
+        px, py = box
+        for y in range(layer.h):
+            dy = py + y
+            if dy < 0 or dy >= self.h:
+                continue
+            for x in range(layer.w):
+                dx = px + x
+                if dx < 0 or dx >= self.w:
+                    continue
+                si = (y * layer.w + x) * 4
+                a = layer.px[si + 3]
+                if a == 0:
+                    continue
+                di = (dy * self.w + dx) * 3
+                if a == 255:
+                    self.px[di:di + 3] = layer.px[si:si + 3]
+                else:
+                    inv = 255 - a
+                    for k in range(3):
+                        s = layer.px[si + k]
+                        dd = self.px[di + k]
+                        self.px[di + k] = (s * a + dd * inv + 127) // 255
+
+    def rotate(self, angle):
+        """Rotate counter-clockwise by `angle` degrees, expanding the
+        canvas to fit. Bilinear sampling; transparent outside."""
+        rad = math.radians(angle)
+        ca = math.cos(rad)
+        sa = math.sin(rad)
+        w, h = self.w, self.h
+        nw = int(math.ceil(w * abs(ca) + h * abs(sa)))
+        nh = int(math.ceil(w * abs(sa) + h * abs(ca)))
+        out = Canvas(nw, nh, (0, 0, 0, 0), rgba=self.rgba)
+        cx, cy = w / 2.0, h / 2.0
+        ncx, ncy = nw / 2.0, nh / 2.0
+        for oy in range(nh):
+            for ox in range(nw):
+                dx = ox - ncx
+                dy = oy - ncy
+                sx = cx + dx * ca - dy * sa
+                sy = cy + dx * sa + dy * ca
+                x0 = int(math.floor(sx))
+                y0 = int(math.floor(sy))
+                fx = sx - x0
+                fy = sy - y0
+                acc = [0.0] * self.ch
+                for j, wy in ((0, 1 - fy), (1, fy)):
+                    yy = y0 + j
+                    if yy < 0 or yy >= h:
+                        continue
+                    for i, wx in ((0, 1 - fx), (1, fx)):
+                        xx = x0 + i
+                        if xx < 0 or xx >= w:
+                            continue
+                        wt = wx * wy
+                        base = (yy * w + xx) * self.ch
+                        for k in range(self.ch):
+                            acc[k] += self.px[base + k] * wt
+                oi = (oy * nw + ox) * self.ch
+                for k in range(self.ch):
+                    out.px[oi + k] = max(0, min(255, int(round(acc[k]))))
+        return out
+
+    def save_png(self, path):
+        _save_png(path, self.w, self.h, self.px)
+
+
 # ---------------------------------------------------------------------------
 # 5x7 bitmap font. Each glyph is 7 rows of 5 cells; '#' is ink.
-# Rendered by plotting filled rectangles with ImageDraw, so it needs no
-# freetype and no font file at all.
+# Rendered by plotting filled rectangles on the canvas, so it needs no
+# font loader and no font file at all.
 # ---------------------------------------------------------------------------
 GLYPHS = {
     "A": (".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
@@ -133,8 +484,8 @@ class BitmapFont:
     """A fixed-advance bitmap font sized like the size it replaces.
 
     advance is about 0.62 * size and height about size, so text lands in
-    the same boxes the DejaVu sizes were laid out for. One style for all
-    text; F_SERIF / F_SANS / F_MONO are all this font.
+    the same boxes the earlier layout used. One style for all text;
+    F_SERIF / F_SANS / F_MONO are all this font.
     """
 
     def __init__(self, size):
@@ -215,7 +566,7 @@ F_MONO_B = F_SERIF
 
 
 def draw_text(d, xy, text, fnt, fill, anchor="la"):
-    """Draw text with the bitmap font; anchor la/ma/ra/mm like PIL."""
+    """Draw text with the bitmap font; anchor la/ma/ra/mm like before."""
     fnt.draw(d, xy, text, fill, anchor)
 
 
@@ -303,8 +654,8 @@ def draw_portrait(img):
     for y in range(y0, y1):
         t = (y - y0) / (y1 - y0)
         c = tuple(int(top[i] + (bot[i] - top[i]) * t) for i in range(3))
-        img.paste(c, (x0, y, x1, y + 1))
-    d = ImageDraw.Draw(img)
+        img.paste_color(c, (x0, y, x1, y + 1))
+    d = img
     # shoulders / wool sweater
     d.polygon([(x0, y1), (x0, 288), (52, 272), (78, 264), (128, 264),
                (154, 272), (x1, 288), (x1, y1)], fill=(38, 54, 79))
@@ -356,19 +707,18 @@ def draw_portrait(img):
     d.line([(105, 238), (116, 240)], fill=(90, 78, 66), width=5)
     d.arc([92, 243, 114, 255], 20, 160, fill=(110, 58, 46), width=3)
     # soft shading on the right side of the face
-    ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    od = ImageDraw.Draw(ov)
+    ov = Canvas(W, H, (0, 0, 0, 0), rgba=True)
+    od = ov
     od.ellipse([112, 156, 146, 254], fill=(0, 0, 0, 22))
-    img.paste(Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB"),
-              (0, 0))
+    img.composite(ov)
     # photo frame
-    ImageDraw.Draw(img).rectangle([x0, y0, x1, y1], outline=NAVY, width=2)
+    img.rectangle([x0, y0, x1, y1], outline=NAVY, width=2)
 
 
 def make_stamp(lines, color, w=216, h=108):
     """One rubber stamp on its own layer; lines are (text, font)."""
-    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
+    layer = Canvas(w, h, (0, 0, 0, 0), rgba=True)
+    d = layer
     c = color + (235,)
     d.rounded_rectangle([3, 3, w - 4, h - 4], radius=10, outline=c, width=3)
     d.rounded_rectangle([8, 8, w - 9, h - 9], radius=7,
@@ -384,18 +734,18 @@ def make_stamp(lines, color, w=216, h=108):
 def main():
     out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
     os.makedirs(out_dir, exist_ok=True)
-    img = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(img)
+    img = Canvas(W, H, PAPER)
+    d = img
 
     # faint guilloche rings behind the spread
-    ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    od = ImageDraw.Draw(ov)
+    ov = Canvas(W, H, (0, 0, 0, 0), rgba=True)
+    od = ov
     for cx in (256, 768):
         for r in (170, 210, 250):
             od.ellipse([cx - r, 362 - r, cx + r, 362 + r],
                        outline=(42, 74, 138, 10), width=1)
-    img = Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB")
-    d = ImageDraw.Draw(img)
+    img.composite(ov)
+    d = img
 
     # outer border + centre gutter
     d.rectangle([2, 2, W - 3, H - 3], outline=(26, 26, 26), width=2)
@@ -411,7 +761,7 @@ def main():
     d.line([(28, 100), (484, 100)], fill=NAVY, width=2)
 
     draw_portrait(img)
-    d = ImageDraw.Draw(img)
+    d = img
     draw_text(d, (28, 302), "PHOTO \u00b7 FOTO", F_SANS(8), GREY)
 
     # signature under the photo
@@ -504,9 +854,9 @@ def main():
     ]
     for lines, color, angle, (px, py) in stamps:
         st = make_stamp(lines, color)
-        st = st.rotate(angle, expand=True, resample=Image.BICUBIC)
-        img.paste(st, (px, py), st)
-    d = ImageDraw.Draw(img)
+        st = st.rotate(angle)
+        img.paste(st, (px, py))
+    d = img
 
     # telling detail: Kavora has no airport — everything comes by sea
     d.rectangle([540, 490, 996, 560], fill=(253, 246, 240),
@@ -522,18 +872,18 @@ def main():
     fee = make_stamp([("HARBOR FEE PAID", F_SANS_B(11)),
                       ("40 KAVORI", F_SANS_B(11)),
                       ("22 JUN 2023", F_MONO_B(11))], RED, w=190, h=84)
-    fee = fee.rotate(-6, expand=True, resample=Image.BICUBIC)
-    img.paste(fee, (780, 584), fee)
-    d = ImageDraw.Draw(img)
+    fee = fee.rotate(-6)
+    img.paste(fee, (780, 584))
+    d = img
 
     draw_text(d, (768, 692),
               "THIS PASSPORT REMAINS THE PROPERTY OF THE REPUBLIC OF KAVORA",
               F_SANS(8), GREY, anchor="ma")
 
     path = os.path.join(out_dir, "entry.png")
-    img.save(path, "PNG")
+    img.save_png(path)
     os.chmod(path, 0o644)
-    print("wrote", path, img.size)
+    print("wrote", path, (W, H))
 
 
 if __name__ == "__main__":
