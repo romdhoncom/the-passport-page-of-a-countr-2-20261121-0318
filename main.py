@@ -31,7 +31,7 @@ BLUE = (42, 74, 138)
 PURPLE = (90, 58, 122)
 GOLD = (217, 180, 90)
 
-FONT_DIR = "/usr/share/fonts/truetype/dejavu"
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 
 
 def font(name, size):
