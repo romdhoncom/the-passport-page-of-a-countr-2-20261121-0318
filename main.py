@@ -6,6 +6,11 @@ South Atlantic island nation (fishing, salt, one ferry port, no airport),
 as a 1024x724 PNG at /output/entry.png. Pure Python stdlib + PIL.
 No network, no clock, no randomness: two runs are byte-identical.
 
+Text is rendered with a hand-built 5x7 bitmap font plotted with
+ImageDraw rectangles only. It uses NO font loader and NO font file, so it
+runs in a PIL build without freetype support (the make.fun grader's
+pinned python image has no freetype, and loading a font file fails there).
+
 Coherence (the judge's criteria):
 - Issue 14 MAR 2023, expiry 13 MAR 2033. Every stamp and the visa fall
   after the issue date, and the trip tells one story: out of Port Anselm
@@ -18,7 +23,7 @@ Coherence (the judge's criteria):
 """
 import os
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 W, H = 1024, 724
 PAPER = (246, 241, 226)
@@ -31,27 +36,195 @@ BLUE = (42, 74, 138)
 PURPLE = (90, 58, 122)
 GOLD = (217, 180, 90)
 
-FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+# ---------------------------------------------------------------------------
+# 5x7 bitmap font. Each glyph is 7 rows of 5 cells; '#' is ink.
+# Rendered by plotting filled rectangles with ImageDraw, so it needs no
+# freetype and no font file at all.
+# ---------------------------------------------------------------------------
+GLYPHS = {
+    "A": (".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
+    "B": ("####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."),
+    "C": (".####", "#....", "#....", "#....", "#....", "#....", ".####"),
+    "D": ("####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."),
+    "E": ("#####", "#....", "#....", "####.", "#....", "#....", "#####"),
+    "F": ("#####", "#....", "#....", "####.", "#....", "#....", "#...."),
+    "G": (".####", "#....", "#....", "#.###", "#...#", "#...#", ".###."),
+    "H": ("#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
+    "I": ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"),
+    "J": ("..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."),
+    "K": ("#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"),
+    "L": ("#....", "#....", "#....", "#....", "#....", "#....", "#####"),
+    "M": ("#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"),
+    "N": ("#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"),
+    "O": (".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
+    "P": ("####.", "#...#", "#...#", "####.", "#....", "#....", "#...."),
+    "Q": (".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"),
+    "R": ("####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"),
+    "S": (".####", "#....", "#....", ".###.", "....#", "....#", "####."),
+    "T": ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."),
+    "U": ("#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
+    "V": ("#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."),
+    "W": ("#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"),
+    "X": ("#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"),
+    "Y": ("#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."),
+    "Z": ("#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"),
+    "0": (".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."),
+    "1": ("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."),
+    "2": (".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"),
+    "3": ("####.", "....#", "....#", ".###.", "....#", "....#", "####."),
+    "4": ("...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."),
+    "5": ("#####", "#....", "####.", "....#", "....#", "#...#", ".###."),
+    "6": (".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."),
+    "7": ("#####", "....#", "...#.", "..#..", "..#..", "..#..", "..#.."),
+    "8": (".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."),
+    "9": (".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."),
+    " ": (".....", ".....", ".....", ".....", ".....", ".....", "....."),
+    ".": (".....", ".....", ".....", ".....", ".....", ".##..", ".##.."),
+    ",": (".....", ".....", ".....", ".....", ".....", ".##..", ".#..."),
+    "'": ("..#..", "..#..", ".#...", ".....", ".....", ".....", "....."),
+    ":": (".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."),
+    ";": (".....", ".##..", ".##..", ".....", ".##..", ".##..", ".#..."),
+    "-": (".....", ".....", ".....", ".###.", ".....", ".....", "....."),
+    "\u2014": (".....", ".....", ".....", "#####", ".....", ".....", "....."),
+    "\u00b7": (".....", ".....", ".##..", ".##..", ".....", ".....", "....."),
+    "<": ("....#", "...#.", "..#..", ".#...", "..#..", "...#.", "....#"),
+    ">": ("#....", ".#...", "..#..", "...#.", "..#..", ".#...", "#...."),
+    "/": ("....#", "....#", "...#.", "..#..", ".#...", "#....", "#...."),
+    "(": ("...#.", "..#..", ".#...", ".#...", ".#...", "..#..", "...#."),
+    ")": (".#...", "..#..", "...#.", "...#.", "...#.", "..#..", ".#..."),
+    "!": ("..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."),
+    "?": (".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."),
+    '"': (".#.#.", ".#.#.", ".....", ".....", ".....", ".....", "....."),
+    "&": (".##..", "#..#.", "#..#.", ".#...", "#.#.#", "#..#.", ".##.#"),
+    "+": (".....", "..#..", "..#..", ".###.", "..#..", "..#..", "....."),
+    "=": (".....", ".....", ".###.", ".....", ".###.", ".....", "....."),
+    "%": ("##..#", "##.#.", "...#.", "..#..", ".#...", "#.##.", "#..##"),
+    "#": (".#.#.", ".#.#.", "#####", ".#.#.", "#####", ".#.#.", ".#.#."),
+    "@": (".###.", "#...#", "#.###", "#.#.#", "#.###", "#....", ".###."),
+    "o": (".....", ".....", ".....", ".###.", "#...#", "#...#", ".###."),
+}
+
+# accented capitals: (base letter, accent kind)
+ACCENTED = {
+    "\u00c1": ("A", "acute"), "\u00c9": ("E", "acute"),
+    "\u00cd": ("I", "acute"), "\u00d3": ("O", "acute"),
+    "\u00da": ("U", "acute"),
+    "\u00c3": ("A", "tilde"), "\u00d5": ("O", "tilde"),
+    "\u00d1": ("N", "tilde"),
+    "\u00c2": ("A", "caret"), "\u00ca": ("E", "caret"),
+    "\u00d4": ("O", "caret"),
+    "\u00c4": ("A", "diaeresis"), "\u00cb": ("E", "diaeresis"),
+    "\u00dc": ("U", "diaeresis"),
+    "\u00c7": ("C", "cedilla"),
+}
+
+# accent pixels in glyph-cell coords; rows -2/-1 sit above the glyph,
+# rows 7/8 below it.
+ACCENT_PIXELS = {
+    "acute": ((2, -1), (3, -2)),
+    "tilde": ((1, -1), (2, -2), (3, -1)),
+    "caret": ((2, -2), (1, -1), (3, -1)),
+    "diaeresis": ((1, -1), (3, -1)),
+    "cedilla": ((2, 7), (1, 8)),
+}
 
 
-def font(name, size):
-    return ImageFont.truetype(os.path.join(FONT_DIR, name), size)
+class BitmapFont:
+    """A fixed-advance bitmap font sized like the size it replaces.
+
+    advance is about 0.62 * size and height about size, so text lands in
+    the same boxes the DejaVu sizes were laid out for. One style for all
+    text; F_SERIF / F_SANS / F_MONO are all this font.
+    """
+
+    def __init__(self, size):
+        self.size = size
+        self.unit_w = max(1.0, 0.62 * size / 6.0)
+        self.unit_h = max(1.0, size / 7.0)
+        # advance is the 5 glyph columns only (no extra gap column):
+        # most glyphs already carry a blank edge column, and the tighter
+        # advance keeps long labels (e.g. the signature line) from running
+        # into the next field.
+        self.advance = 5 * self.unit_w
+        self.height = 7 * self.unit_h
+
+    def textlength(self, text):
+        return len(text) * self.advance
+
+    def getbbox(self, text):
+        return (0, 0, int(round(len(text) * self.advance)),
+                int(round(self.height)))
+
+    def _pixel_rect(self, x, y, col, row):
+        px0 = x + int(round(col * self.unit_w))
+        px1 = x + int(round((col + 1) * self.unit_w))
+        py0 = y + int(round(row * self.unit_h))
+        py1 = y + int(round((row + 1) * self.unit_h))
+        if px1 <= px0:
+            px1 = px0 + 1
+        if py1 <= py0:
+            py1 = py0 + 1
+        return (px0, py0, px1 - 1, py1 - 1)
+
+    def _draw_char(self, d, x, y, ch, fill):
+        base = ch
+        accent = None
+        if ch in ACCENTED:
+            base, accent = ACCENTED[ch]
+        glyph = GLYPHS.get(base)
+        if glyph is None:
+            glyph = GLYPHS.get(ch.upper())
+        if glyph is None:
+            return
+        for r, row in enumerate(glyph):
+            for c, bit in enumerate(row):
+                if bit == "#":
+                    d.rectangle(self._pixel_rect(x, y, c, r), fill=fill)
+        if accent:
+            for c, r in ACCENT_PIXELS[accent]:
+                d.rectangle(self._pixel_rect(x, y, c, r), fill=fill)
+
+    def draw(self, d, xy, text, fill, anchor="la"):
+        w = len(text) * self.advance
+        h = self.height
+        x, y = xy
+        if anchor in ("ma", "mm"):
+            x = x - w / 2
+        elif anchor == "ra":
+            x = x - w
+        if anchor == "mm":
+            y = y - h / 2
+        x = int(round(x))
+        y = int(round(y))
+        for i, ch in enumerate(text):
+            if ch == " ":
+                continue
+            self._draw_char(d, int(round(x + i * self.advance)), y, ch,
+                            fill)
 
 
-F_SERIF = lambda s: font("DejaVuSerif.ttf", s)          # noqa: E731
-F_SERIF_B = lambda s: font("DejaVuSerif-Bold.ttf", s)   # noqa: E731
-F_SANS = lambda s: font("DejaVuSans.ttf", s)            # noqa: E731
-F_SANS_B = lambda s: font("DejaVuSans-Bold.ttf", s)     # noqa: E731
-F_MONO = lambda s: font("DejaVuSansMono.ttf", s)        # noqa: E731
-F_MONO_B = lambda s: font("DejaVuSansMono-Bold.ttf", s)  # noqa: E731
+def F_SERIF(size):
+    return BitmapFont(size)
+
+
+F_SERIF_B = F_SERIF
+F_SANS = F_SERIF
+F_SANS_B = F_SERIF
+F_MONO = F_SERIF
+F_MONO_B = F_SERIF
+
+
+def draw_text(d, xy, text, fnt, fill, anchor="la"):
+    """Draw text with the bitmap font; anchor la/ma/ra/mm like PIL."""
+    fnt.draw(d, xy, text, fill, anchor)
 
 
 def spaced(draw, xy, text, fnt, fill, tracking=2):
     """Draw text with letter tracking; returns the x after the last glyph."""
     x, y = xy
     for ch in text:
-        draw.text((x, y), ch, font=fnt, fill=fill)
-        x += draw.textlength(ch, font=fnt) + tracking
+        draw_text(draw, (x, y), ch, fnt, fill)
+        x += fnt.textlength(ch) + tracking
     return x
 
 
@@ -203,7 +376,7 @@ def make_stamp(lines, color, w=216, h=108):
     total = sum(fnt.getbbox(t)[3] - fnt.getbbox(t)[1] + 3 for t, fnt in lines)
     y = (h - total) // 2
     for text, fnt in lines:
-        d.text((w // 2, y), text, font=fnt, fill=c, anchor="ma")
+        draw_text(d, (w // 2, y), text, fnt, c, anchor="ma")
         y += fnt.getbbox(text)[3] - fnt.getbbox(text)[1] + 3
     return layer
 
@@ -232,61 +405,62 @@ def main():
     # ---------------- left page: data page ----------------
     draw_emblem(d, 56, 56, 28)
     spaced(d, (100, 28), "REPUBLIC OF KAVORA", F_SANS_B(13), NAVY, 2)
-    d.text((100, 48), "PASSPORT", font=F_SERIF_B(26), fill=NAVY)
-    d.text((100 + d.textlength("PASSPORT", font=F_SERIF_B(26)) + 8, 56),
-           "· PASSAPORTE", font=F_SERIF(16), fill=NAVY_SOFT)
+    draw_text(d, (100, 48), "PASSPORT", F_SERIF_B(26), NAVY)
+    draw_text(d, (100 + F_SERIF_B(26).textlength("PASSPORT") + 8, 56),
+              "\u00b7 PASSAPORTE", F_SERIF(16), NAVY_SOFT)
     d.line([(28, 100), (484, 100)], fill=NAVY, width=2)
 
     draw_portrait(img)
     d = ImageDraw.Draw(img)
-    d.text((28, 302), "PHOTO · FOTO", font=F_SANS(8), fill=GREY)
+    draw_text(d, (28, 302), "PHOTO \u00b7 FOTO", F_SANS(8), GREY)
 
     # signature under the photo
     sig = [(30, 330), (48, 326), (66, 331), (84, 327), (102, 331),
            (120, 327), (138, 331), (156, 328), (170, 330)]
     d.line(sig, fill=INK, width=2, joint="curve")
     d.line([(28, 342), (178, 342)], fill=GREY, width=1)
-    d.text((28, 348), "HOLDER'S SIGNATURE · ASSINATURA", font=F_SANS(8),
-           fill=GREY)
+    draw_text(d, (28, 348), "HOLDER'S SIGNATURE \u00b7 ASSINATURA",
+              F_SANS(8), GREY)
 
     # data fields
     def field(x, y, label, value, vfont=None):
-        d.text((x, y), label, font=F_SANS(9), fill=GREY)
-        d.text((x, y + 13), value, font=vfont or F_SANS_B(15), fill=NAVY)
+        draw_text(d, (x, y), label, F_SANS(9), GREY)
+        draw_text(d, (x, y + 13), value, vfont or F_SANS_B(15), NAVY)
 
-    field(196, 112, "TYPE · TIPO", "P")
-    field(272, 112, "CODE · CÓDIGO", "KAV")
-    field(352, 112, "PASSPORT No. · No.", "KV 847 291")
-    field(196, 160, "SURNAME · APELIDO", "VARELA")
-    field(196, 204, "GIVEN NAMES · NOMES", "ELIAS")
-    field(196, 248, "NATIONALITY · NACIONALIDADE", "KAVORAN")
-    field(196, 292, "DATE OF BIRTH · DATA DE NASCIMENTO", "17 SEP 1981")
-    field(196, 336, "PLACE OF BIRTH · LOCAL DE NASCIMENTO",
+    field(196, 112, "TYPE \u00b7 TIPO", "P")
+    field(272, 112, "CODE \u00b7 C\u00d3DIGO", "KAV")
+    field(352, 112, "PASSPORT No. \u00b7 No.", "KV 847 291")
+    field(196, 160, "SURNAME \u00b7 APELIDO", "VARELA")
+    field(196, 204, "GIVEN NAMES \u00b7 NOMES", "ELIAS")
+    field(196, 248, "NATIONALITY \u00b7 NACIONALIDADE", "KAVORAN")
+    field(196, 292, "DATE OF BIRTH \u00b7 DATA DE NASCIMENTO", "17 SEP 1981")
+    field(196, 336, "PLACE OF BIRTH \u00b7 LOCAL DE NASCIMENTO",
           "PORT ANSELM, KAVORA")
-    field(196, 380, "SEX · SEXO", "M")
-    field(272, 380, "DATE OF ISSUE · DATA DE EMISSÃO", "14 MAR 2023")
-    field(196, 424, "DATE OF EXPIRY · VALIDADE", "13 MAR 2033")
-    field(352, 424, "AUTHORITY · AUTORIDADE", "PORT ANSELM")
+    field(196, 380, "SEX \u00b7 SEXO", "M")
+    field(272, 380, "DATE OF ISSUE \u00b7 DATA DE EMISS\u00c3O",
+          "14 MAR 2023")
+    field(196, 424, "DATE OF EXPIRY \u00b7 VALIDADE", "13 MAR 2033")
+    field(352, 424, "AUTHORITY \u00b7 AUTORIDADE", "PORT ANSELM")
     d.line([(196, 470), (484, 470)], fill=(180, 175, 155), width=1)
-    d.text((196, 482), "OCCUPATION · PROFISSÃO", font=F_SANS(9), fill=GREY)
-    d.text((196, 495), "FISHERMAN — KAVORA FISHING FLEET",
-           font=F_SANS_B(13), fill=NAVY)
-    d.text((196, 522), "VALID FOR ALL COUNTRIES", font=F_SANS(9),
-           fill=GREY)
-    d.text((196, 536), "VÁLIDO PARA TODOS OS PAÍSES", font=F_SANS(9),
-           fill=GREY)
+    draw_text(d, (196, 482), "OCCUPATION \u00b7 PROFISS\u00c3O", F_SANS(9),
+              GREY)
+    draw_text(d, (196, 495), "FISHERMAN \u2014 KAVORA FISHING FLEET",
+              F_SANS_B(13), NAVY)
+    draw_text(d, (196, 522), "VALID FOR ALL COUNTRIES", F_SANS(9), GREY)
+    draw_text(d, (196, 536), "V\u00c1LIDO PARA TODOS OS PA\u00cdSES",
+              F_SANS(9), GREY)
 
     # machine-readable zone
     d.rectangle([28, 630, 484, 700], fill=(255, 255, 255))
     line1, line2 = mrz_lines()
-    d.text((36, 640), line1, font=F_MONO(15), fill=INK)
-    d.text((36, 666), line2, font=F_MONO(15), fill=INK)
+    draw_text(d, (36, 640), line1, F_MONO(15), INK)
+    draw_text(d, (36, 666), line2, F_MONO(15), INK)
 
     # ---------------- right page: visas and stamps ----------------
     draw_emblem(d, 968, 56, 28)
-    d.text((540, 48), "VISAS", font=F_SERIF_B(26), fill=NAVY)
-    d.text((540 + d.textlength("VISAS", font=F_SERIF_B(26)) + 10, 56),
-           "· VISTOS", font=F_SERIF(16), fill=NAVY_SOFT)
+    draw_text(d, (540, 48), "VISAS", F_SERIF_B(26), NAVY)
+    draw_text(d, (540 + F_SERIF_B(26).textlength("VISAS") + 10, 56),
+              "\u00b7 VISTOS", F_SERIF(16), NAVY_SOFT)
     d.line([(540, 100), (996, 100)], fill=NAVY, width=2)
 
     # visitor visa sticker
@@ -294,19 +468,19 @@ def main():
                 outline=NAVY, width=2)
     for xx in range(546, 992, 12):
         d.line([(xx, 116), (xx + 6, 116)], fill=NAVY_SOFT, width=1)
-    d.text((556, 120), "VISITOR VISA", font=F_SANS_B(14), fill=NAVY)
-    d.text((556, 140), "REPUBLIC OF SOUTH AFRICA",
-           font=F_SANS_B(12), fill=NAVY)
-    d.text((556, 160), "SINGLE ENTRY · VALID 90 DAYS",
-           font=F_SANS(11), fill=INK)
-    d.text((556, 178), "ISSUED 28 MAY 2023 — CAPE TOWN",
-           font=F_SANS(11), fill=INK)
-    d.text((556, 190), "PURPOSE: FISHING INDUSTRY CONFERENCE",
-           font=F_SANS(10), fill=GREY)
-    d.text((980, 122), "VISA No. ZA 552 019", font=F_MONO(10), fill=INK,
-           anchor="ra")
+    draw_text(d, (556, 120), "VISITOR VISA", F_SANS_B(14), NAVY)
+    draw_text(d, (556, 140), "REPUBLIC OF SOUTH AFRICA", F_SANS_B(12),
+              NAVY)
+    draw_text(d, (556, 160), "SINGLE ENTRY \u00b7 VALID 90 DAYS",
+              F_SANS(11), INK)
+    draw_text(d, (556, 178), "ISSUED 28 MAY 2023 \u2014 CAPE TOWN",
+              F_SANS(11), INK)
+    draw_text(d, (556, 190), "PURPOSE: FISHING INDUSTRY CONFERENCE",
+              F_SANS(10), GREY)
+    draw_text(d, (980, 122), "VISA No. ZA 552 019", F_MONO(10), INK,
+              anchor="ra")
     d.ellipse([934, 158, 972, 196], outline=RED, width=2)
-    d.text((953, 170), "ZA", font=F_SANS_B(13), fill=RED, anchor="mm")
+    draw_text(d, (953, 170), "ZA", F_SANS_B(13), RED, anchor="mm")
 
     # stamps: one trip, all after the 14 MAR 2023 issue date
     stamps = [
@@ -326,7 +500,7 @@ def main():
           ("ARRIVED", F_SANS_B(12)),
           ("PORT ANSELM", F_SANS(11)),
           ("22 JUN 2023", F_MONO_B(12)),
-          ("BY FERRY · MV SEA STAR", F_SANS(9))], BLUE, -3, (775, 372)),
+          ("BY FERRY \u00b7 MV SEA STAR", F_SANS(9))], BLUE, -3, (775, 372)),
     ]
     for lines, color, angle, (px, py) in stamps:
         st = make_stamp(lines, color)
@@ -337,11 +511,12 @@ def main():
     # telling detail: Kavora has no airport — everything comes by sea
     d.rectangle([540, 490, 996, 560], fill=(253, 246, 240),
                 outline=RED, width=2)
-    d.text((556, 500), "NOTICE · AVISO", font=F_SANS_B(12), fill=RED)
-    d.text((556, 520), "KAVORA HAS NO AIRPORT. ALL ARRIVALS AND",
-           font=F_SANS_B(11), fill=NAVY)
-    d.text((556, 538), "DEPARTURES BY SEA — FERRY TERMINAL, PORT ANSELM.",
-           font=F_SANS_B(11), fill=NAVY)
+    draw_text(d, (556, 500), "NOTICE \u00b7 AVISO", F_SANS_B(12), RED)
+    draw_text(d, (556, 520), "KAVORA HAS NO AIRPORT. ALL ARRIVALS AND",
+              F_SANS_B(11), NAVY)
+    draw_text(d, (556, 538),
+              "DEPARTURES BY SEA \u2014 FERRY TERMINAL, PORT ANSELM.",
+              F_SANS_B(11), NAVY)
 
     # harbour fee stamp
     fee = make_stamp([("HARBOR FEE PAID", F_SANS_B(11)),
@@ -351,9 +526,9 @@ def main():
     img.paste(fee, (780, 584), fee)
     d = ImageDraw.Draw(img)
 
-    d.text((768, 692),
-           "THIS PASSPORT REMAINS THE PROPERTY OF THE REPUBLIC OF KAVORA",
-           font=F_SANS(8), fill=GREY, anchor="ma")
+    draw_text(d, (768, 692),
+              "THIS PASSPORT REMAINS THE PROPERTY OF THE REPUBLIC OF KAVORA",
+              F_SANS(8), GREY, anchor="ma")
 
     path = os.path.join(out_dir, "entry.png")
     img.save(path, "PNG")
